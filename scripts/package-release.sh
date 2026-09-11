@@ -11,6 +11,7 @@ mkdir -p "$STAGE/$NAME/docs" "$STAGE/$NAME/scripts" dist
 ditto build/面试日程.app "$STAGE/$NAME/面试日程.app"
 cp README.md LICENSE "$STAGE/$NAME/"
 cp docs/PRIVACY.md docs/NATIVE-WIDGETS.md docs/AI-SERVICES.md "$STAGE/$NAME/docs/"
+ditto docs/images "$STAGE/$NAME/docs/images"
 cp scripts/install-browser-host.sh "$STAGE/$NAME/scripts/"
 ditto BrowserExtension "$STAGE/$NAME/BrowserExtension"
 python3 scripts/check-release.py "$STAGE"
