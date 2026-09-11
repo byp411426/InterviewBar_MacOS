@@ -15,12 +15,14 @@ struct Dashboard: View {
     var openSettings: () -> Void
     var openJourney: () -> Void
     var importMail: () -> Void
+    var editUnscheduled: (UnscheduledEvent) -> Void = { _ in }
     @State private var filter = "待办"
     @State private var search = ""
     @State private var kindFilter = EventKindFilter.all
+    @State private var pendingDeletion: UnscheduledEvent?
     var typeEvents: [InterviewEvent] { store.events.filter { kindFilter.matches($0.kind) } }
     var typeUnscheduled: [UnscheduledEvent] { store.unscheduled.filter { kindFilter.matches($0.kind) } }
-    var visibleUnscheduled: [UnscheduledEvent] { filter == "已完成" ? [] : typeUnscheduled.filter { search.isEmpty || ($0.company + $0.role).localizedCaseInsensitiveContains(search) } }
+    var visibleUnscheduled: [UnscheduledEvent] { typeUnscheduled.filter { (filter == "全部" || (filter == "待办" ? $0.recordStatus == .pending : $0.recordStatus == .completed)) && (search.isEmpty || ($0.displayCompany + $0.role).localizedCaseInsensitiveContains(search)) } }
     var next: InterviewEvent? { typeEvents.filter { $0.status == .pending && $0.date >= store.now }.min { $0.date < $1.date } }
     var filtered: [InterviewEvent] {
         typeEvents.filter { event in
@@ -61,9 +63,9 @@ struct Dashboard: View {
             HStack(spacing: 0) {
                 stat("待进行", typeEvents.filter { $0.status == .pending && $0.date >= store.now }.count)
                 Divider().frame(height: 22)
-                stat("待确认", typeEvents.filter { $0.status == .pending && $0.date < store.now }.count + typeUnscheduled.count)
+                stat("待确认", typeEvents.filter { $0.status == .pending && $0.date < store.now }.count + typeUnscheduled.filter { $0.recordStatus == .pending }.count)
                 Divider().frame(height: 22)
-                stat("已完成", typeEvents.filter { $0.status == .completed }.count)
+                stat("已完成", typeEvents.filter { $0.status == .completed }.count + typeUnscheduled.filter { $0.recordStatus == .completed }.count)
             }.padding(.vertical, 16).padding(.horizontal, 12)
             HStack(spacing: 12) {
                 Picker("筛选", selection: $filter) { ForEach(["待办", "已完成", "全部"], id: \.self) { Text($0) } }.labelsHidden().pickerStyle(.segmented).frame(width: 205)
@@ -81,11 +83,18 @@ struct Dashboard: View {
                         EventRow(event: event, now: store.now, edit: { edit(event) }, status: { store.setStatus(event, $0) })
                         Divider().padding(.leading, 68)
                     }
-                    if filter != "已完成" {
+                    Group {
                         ForEach(visibleUnscheduled) { item in
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack { Text(item.displayCompany).font(.system(size: 13, weight: .semibold)); Spacer(); Text("时间待通知").font(.system(size: 10)).foregroundStyle(.orange) }
-                                Text((item.kind?.rawValue ?? "类型待确认") + " · " + item.displayTime).font(.system(size: 10)).foregroundStyle(.secondary)
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack { Text(item.displayCompany).font(.system(size: 13, weight: .semibold)); Spacer(); Text(item.statusLabel).font(.system(size: 10)).foregroundStyle(item.recordStatus == .pending ? Color.orange : Color.secondary) }
+                                    Text((item.kind?.rawValue ?? "类型待确认") + " · " + item.displayTime).font(.system(size: 10)).foregroundStyle(.secondary)
+                                }
+                                Menu {
+                                    UnscheduledMenuActions(item: item, store: store, edit: { editUnscheduled(item) }, delete: { pendingDeletion = item })
+                                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 28) }
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                                    .accessibilityLabel(item.displayCompany + "待确认安排操作")
                             }.padding(.horizontal, 22).padding(.vertical, 12)
                             Divider()
                         }
@@ -111,6 +120,7 @@ struct Dashboard: View {
             }.foregroundStyle(.secondary).padding(.horizontal, 22).padding(.vertical, 14)
         }.frame(width: sizing.size.width, height: sizing.size.height).background(Color(nsColor: .windowBackgroundColor))
             .overlay { PanelResizeEdges(sizing: sizing) }
+            .unscheduledDeletion(item: $pendingDeletion, store: store)
             .alert("日程提示", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("好") { store.error = nil } } message: { Text(store.error ?? "") }
     }
     func stat(_ label: String, _ count: Int) -> some View {
@@ -122,6 +132,43 @@ struct Dashboard: View {
         if seconds < 3600 { return "还有 \(Int(seconds / 60)) 分钟" }
         if seconds < 86400 { return "还有 \(Int(seconds / 3600)) 小时" }
         return "还有 \(Int(seconds / 86400)) 天"
+    }
+}
+
+private struct UnscheduledDeletion: ViewModifier {
+    @Binding var item: UnscheduledEvent?
+    @ObservedObject var store: EventStore
+    func body(content: Content) -> some View {
+        content.confirmationDialog("删除这条待确认安排？", isPresented: Binding(get: { item != nil }, set: { if !$0 { item = nil } }), titleVisibility: .visible, presenting: item) { pending in
+            Button("取消", role: .cancel) { item = nil }
+            Button("删除", role: .destructive) { store.deleteUnscheduled(pending.id); item = nil }
+        } message: { pending in
+            Text("将删除「\(pending.displayCompany)」的这条记录，并更新统计数量。投递总表、原邮件和其他安排会保留。此操作无法撤销。")
+        }
+    }
+}
+extension View {
+    func unscheduledDeletion(item: Binding<UnscheduledEvent?>, store: EventStore) -> some View {
+        modifier(UnscheduledDeletion(item: item, store: store))
+    }
+}
+struct UnscheduledMenuActions: View {
+    let item: UnscheduledEvent
+    @ObservedObject var store: EventStore
+    let edit: () -> Void
+    let delete: () -> Void
+    var body: some View {
+        Button("编辑安排", action: edit)
+        if let link = item.link, let url = URL(string: link), ["https", "http"].contains(url.scheme ?? ""), url.host != nil {
+            Button("打开链接") { NSWorkspace.shared.open(url) }
+        }
+        Divider()
+        if item.recordStatus != .completed { Button("标记已完成") { store.setUnscheduledStatus(item.id, .completed) } }
+        if item.recordStatus != .pending { Button("恢复待办") { store.setUnscheduledStatus(item.id, .pending) } }
+        if item.recordStatus != .cancelled { Button("取消安排") { store.setUnscheduledStatus(item.id, .cancelled) } }
+        if item.recordStatus != .rejected { Button("标记未通过") { store.setUnscheduledStatus(item.id, .rejected) } }
+        Divider()
+        Button("删除记录", role: .destructive, action: delete)
     }
 }
 struct EventRow: View {

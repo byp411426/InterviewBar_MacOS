@@ -158,10 +158,12 @@ struct WorkspaceView: View {
     @StateObject private var web = SheetWeb()
     let edit: (InterviewEvent?) -> Void
     let export: () -> Void
+    var editUnscheduled: (UnscheduledEvent) -> Void = { _ in }
     @State private var sheetAddress = UserDefaults.standard.string(forKey: "applicationSheetURL") ?? ""
     @State private var page = "本地投递表"
     @State private var search = ""
     @State private var selection: String?
+    @State private var pendingDeletion: UnscheduledEvent?
     @State private var status = "全部"
     @State private var kindFilter = EventKindFilter.all
     private let eventColumns = ["公司", "岗位", "类型", "日期与时间（北京时间）", "开始 / 截止", "状态", "地点 / 会议号", "会议 / 测评链接", "提前提醒", "备注"]
@@ -175,9 +177,9 @@ struct WorkspaceView: View {
             data += store.results.filter { kindFilter == .all && (status == "全部" || $0.status.rawValue == status) }.map { result in
                 GridRow(id: "result-" + result.id.uuidString, cells: [result.company, result.role, "投递结果", "未记录日程时间", "不适用", result.status.rawValue, "", "", "不提醒", result.notes + "\n结果记录于 " + dateText(result.updatedAt)])
             }
-            if status == "全部" || status == EventStatus.pending.rawValue {
-                data += store.unscheduled.filter { kindFilter.matches($0.kind) }.map { item in
-                    GridRow(id: "unscheduled-" + item.id.uuidString, cells: [item.displayCompany, item.role, (item.kind?.rawValue ?? "类型待确认") + (item.round.isEmpty ? "" : " · " + item.round), item.displayTime, item.timing.label, "待通知", item.location ?? "", item.link ?? "", "不设置定时提醒", item.timeNote + "\n" + item.notes])
+            do {
+                data += store.unscheduled.filter { kindFilter.matches($0.kind) && (status == "全部" || $0.recordStatus.rawValue == status) }.map { item in
+                    GridRow(id: "unscheduled-" + item.id.uuidString, cells: [item.displayCompany, item.role, (item.kind?.rawValue ?? "类型待确认") + (item.round.isEmpty ? "" : " · " + item.round), item.displayTime, item.timing.label, item.statusLabel, item.location ?? "", item.link ?? "", "不设置定时提醒", item.timeNote + "\n" + item.notes])
                 }
             }
         } else { data = (sheet.snapshot?.rows ?? []).enumerated().map { GridRow(id: String($0.offset), cells: $0.element) } }
@@ -241,6 +243,10 @@ struct WorkspaceView: View {
                         if let row = selectedRow {
                             Text(row.cells[columns.firstIndex(of: "公司") ?? 0]).font(.system(size: 20, weight: .semibold)).textSelection(.enabled)
                             if page == "日程明细", let event = store.events.first(where: { $0.id.uuidString == row.id }) { Button("编辑这项安排") { edit(event) } }
+                            if page == "日程明细", let pending = store.unscheduled.first(where: { "unscheduled-" + $0.id.uuidString == row.id }) {
+                                Button("编辑安排") { editUnscheduled(pending) }
+                                Menu("更多操作") { UnscheduledMenuActions(item: pending, store: store, edit: { editUnscheduled(pending) }, delete: { pendingDeletion = pending }) }
+                            }
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 15) {
                                     ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
@@ -263,8 +269,9 @@ struct WorkspaceView: View {
                 Text("邮件识别：菜单栏 → 粘贴识别邮件").font(.system(size: 10))
             }.foregroundStyle(.secondary).padding(.horizontal, 18).padding(.vertical, 10)
         }.frame(minWidth: 950, minHeight: 570).background(Color(nsColor: .windowBackgroundColor))
+            .unscheduledDeletion(item: $pendingDeletion, store: store)
             .onChange(of: page) { _ in selection = nil; search = "" }
             .onReceive(NotificationCenter.default.publisher(for: .mailImportCommitted)) { _ in sheet.reload() }
-            .alert("投递表提示", isPresented: Binding(get: { sheet.error != nil }, set: { if !$0 { sheet.error = nil } })) { Button("好") { sheet.error = nil } } message: { Text(sheet.error ?? "") }
+            .alert("投递表提示", isPresented: Binding(get: { sheet.error != nil || store.error != nil }, set: { if !$0 { sheet.error = nil; store.error = nil } })) { Button("好") { sheet.error = nil; store.error = nil } } message: { Text(sheet.error ?? store.error ?? "") }
     }
 }

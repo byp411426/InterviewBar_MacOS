@@ -64,11 +64,11 @@ import Combine
                 if event.location.isEmpty { event.location = old.location }
                 updated[index] = event
             } else { event.notes = note; updated.append(event) }
-            let matches = updatedUnscheduled.indices.filter { MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == draft.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
+            let matches = updatedUnscheduled.indices.filter { updatedUnscheduled[$0].recordStatus == .pending && MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == draft.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
             if matches.count == 1 { updatedUnscheduled.remove(at: matches[0]) }
         } else {
-            var pending = UnscheduledEvent(company: draft.company, role: draft.role, kind: draft.kindUncertain ? nil : draft.kind, round: draft.round, day: draft.day, time: draft.time, timing: draft.timing, timeNote: draft.timeNote, notes: note, location: draft.location, link: draft.link)
-            let matches = updatedUnscheduled.indices.filter { !draft.company.isEmpty && MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == pending.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
+            var pending = UnscheduledEvent(company: draft.company, role: draft.role, kind: draft.kindUncertain ? nil : draft.kind, round: draft.round, day: draft.day, time: draft.time, timing: draft.timing, timeNote: draft.timeNote, notes: note, location: draft.location, link: draft.link, isDeadline: draft.isDeadline)
+            let matches = updatedUnscheduled.indices.filter { !draft.company.isEmpty && updatedUnscheduled[$0].recordStatus == .pending && MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == pending.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
             if matches.count == 1 {
                 let index = matches[0]; pending.id = updatedUnscheduled[index].id; pending.createdAt = updatedUnscheduled[index].createdAt; pending.notes = updatedUnscheduled[index].notes + "\n" + note
                 updatedUnscheduled[index] = pending
@@ -113,6 +113,53 @@ import Combine
     }
     var pending: [InterviewEvent] { events.filter { $0.status == .pending }.sorted { $0.date < $1.date } }
     var next: InterviewEvent? { pending.first { $0.date >= now } }
+    @discardableResult func setUnscheduledStatus(_ id: UUID, _ status: EventStatus) -> Bool {
+        guard let index = unscheduled.firstIndex(where: { $0.id == id }) else { return false }
+        var updated = unscheduled
+        updated[index].status = status
+        return commitUnscheduled(updated)
+    }
+    @discardableResult func saveUnscheduled(_ item: UnscheduledEvent) -> Bool {
+        guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
+        guard let index = unscheduled.firstIndex(where: { $0.id == item.id }) else { error = "这条记录已变化，请重新打开。"; return false }
+        do {
+            let clean = try item.validated()
+            var updated = unscheduled
+            if let event = try clean.scheduledEvent() {
+                updated.remove(at: index)
+                guard !events.contains(where: { $0.id == event.id }) else { throw DataError.invalid("存在相同日程，请重新打开检查。") }
+                let newEvents = events + [event]
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let directory = repository.url.deletingLastPathComponent()
+                do {
+                    try ImportTransaction.commit(["events.json": encoder.encode(EventFile(events: newEvents)), "unscheduled-events.json": encoder.encode(updated)], in: directory)
+                } catch {
+                    if FileManager.default.fileExists(atPath: directory.appendingPathComponent("import-transaction.json").path) { writable = false }
+                    throw error
+                }
+                events = newEvents; unscheduled = updated; schedule()
+                return true
+            }
+            updated[index] = clean
+            return commitUnscheduled(updated)
+        } catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
+    }
+    @discardableResult func deleteUnscheduled(_ id: UUID) -> Bool {
+        guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
+        guard unscheduled.contains(where: { $0.id == id }) else { return true }
+        let updated = unscheduled.filter { $0.id != id }
+        return commitUnscheduled(updated)
+    }
+    @discardableResult private func commitUnscheduled(_ updated: [UnscheduledEvent]) -> Bool {
+        guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
+        do {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let url = repository.url.deletingLastPathComponent().appendingPathComponent("unscheduled-events.json")
+            try encoder.encode(updated).write(to: url, options: .atomic)
+            unscheduled = updated
+            return true
+        } catch { self.error = "保存失败，记录已保留：\(error.localizedDescription)"; return false }
+    }
     @discardableResult func save(_ event: InterviewEvent) -> Bool {
         do {
             let clean = try event.validated()
@@ -206,7 +253,7 @@ import Combine
         popover.animates = false
         popover.contentSize = panelSize.size
         panelSize.resized = { [weak self] size in self?.popover.contentSize = size; self?.writeRuntimeStatus() }
-        popover.contentViewController = NSHostingController(rootView: Dashboard(store: store, sizing: panelSize, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }, openWorkspace: { [weak self] in self?.showWorkspace() }, openSettings: { [weak self] in self?.showSettings() }, openJourney: { [weak self] in self?.showJourney() }, importMail: { [weak self] in self?.showMailImport(MailCapture(text: NSPasteboard.general.string(forType: .string) ?? "")) }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
+        popover.contentViewController = NSHostingController(rootView: Dashboard(store: store, sizing: panelSize, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }, openWorkspace: { [weak self] in self?.showWorkspace() }, openSettings: { [weak self] in self?.showSettings() }, openJourney: { [weak self] in self?.showJourney() }, importMail: { [weak self] in self?.showMailImport(MailCapture(text: NSPasteboard.general.string(forType: .string) ?? "")) }, editUnscheduled: { [weak self] in self?.showUnscheduledEditor($0) }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
         subscription = store.$events.sink { [weak self] _ in DispatchQueue.main.async { self?.updateTitle(); self?.widgets.publishSnapshot() } }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.now = Date(); self?.updateTitle() }
@@ -360,7 +407,7 @@ import Combine
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "我的秋招之旅"; window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 780, height: 620)
-        window.contentView = NSHostingView(rootView: JourneyView(store: store, edit: { [weak self] in self?.showEditor($0) }))
+        window.contentView = NSHostingView(rootView: JourneyView(store: store, edit: { [weak self] in self?.showEditor($0) }, editUnscheduled: { [weak self] in self?.showUnscheduledEditor($0) }))
         journeyWindow = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
     func showWorkspace() {
@@ -369,7 +416,7 @@ import Combine
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "投递总表 · 面试日程"; window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 950, height: 600)
-        window.contentView = NSHostingView(rootView: WorkspaceView(store: store, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
+        window.contentView = NSHostingView(rootView: WorkspaceView(store: store, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }, editUnscheduled: { [weak self] in self?.showUnscheduledEditor($0) }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
         workspace = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
     func showModelSettings() {
@@ -391,6 +438,17 @@ import Combine
         }, cancel: { [weak self, weak window] in window?.close(); self?.show() }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
         editor = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
+    func showUnscheduledEditor(_ item: UnscheduledEvent) {
+        popover.performClose(nil)
+        if let editor, editor.isVisible { editor.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "修正待确认安排"; window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: UnscheduledEditor(item: item, save: { [weak self, weak window] value in
+            if self?.store.saveUnscheduled(value) == true { window?.close(); self?.show() }
+            else { let alert = NSAlert(); alert.messageText = self?.store.error ?? "保存失败"; alert.runModal() }
+        }, cancel: { [weak self, weak window] in window?.close(); self?.show() }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
+        editor = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+    }
     func exportData() {
         popover.performClose(nil)
         let panel = NSSavePanel(); panel.nameFieldStringValue = "面试日程-\(dateText(Date(), "yyyyMMdd")).csv"
@@ -407,7 +465,7 @@ import Combine
             }
             rows += store.unscheduled.map { item in
                 let time = item.day + (item.time.isEmpty ? "" : " " + item.time)
-                let cells: [String] = [item.company, item.role, item.kind?.rawValue ?? "", time, "Asia/Shanghai", item.timing.label, "待通知", item.location ?? "", item.link ?? "", item.timeNote + "\n" + item.notes]
+                let cells: [String] = [item.company, item.role, item.kind?.rawValue ?? "", time, "Asia/Shanghai", item.timing.label, item.statusLabel, item.location ?? "", item.link ?? "", item.timeNote + "\n" + item.notes]
                 return cells.map(csv).joined(separator: ",")
             }
             let content = "\u{FEFF}公司,岗位,类型,时间,时区,时间含义,状态,地点或会议号,链接,备注\r\n" + rows.joined(separator: "\r\n")

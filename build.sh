@@ -16,8 +16,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleName</key><string>面试日程</string>
 <key>CFBundleDisplayName</key><string>面试日程</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.10.2</string>
-<key>CFBundleVersion</key><string>15</string>
+<key>CFBundleShortVersionString</key><string>0.10.3</string>
+<key>CFBundleVersion</key><string>16</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Mail import</string><key>CFBundleURLSchemes</key><array><string>interviewbar</string></array></dict></array>
 <key>LSUIElement</key><true/>

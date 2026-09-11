@@ -14,6 +14,7 @@ private extension EventKind {
 struct JourneyView: View {
     @ObservedObject var store: EventStore
     let edit: (InterviewEvent?) -> Void
+    var editUnscheduled: (UnscheduledEvent) -> Void = { _ in }
     @State private var kind = EventKindFilter.all
     @State private var quote = JourneyStats.nextEncouragement()
     @State private var metric = JourneyMetric.completed
@@ -37,6 +38,21 @@ struct JourneyView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     controls
                     totals
+                    if !store.unscheduled.isEmpty {
+                        DisclosureGroup("时间或信息待补记录 · 已完成 \(store.unscheduled.filter { $0.recordStatus == .completed }.count) 项") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("以下记录单独保留，不计入按周图表，也不受周范围筛选影响。修正为明确的安排时间后再归入对应周。").font(.system(size: 11)).foregroundStyle(.secondary)
+                                ForEach(store.unscheduled.filter { kind.matches($0.kind) && (metric == .scheduled || $0.recordStatus == .completed) }) { item in
+                                    HStack {
+                                        Text(item.displayCompany + " · " + (item.kind?.rawValue ?? "类型待确认"))
+                                        Spacer()
+                                        Text(item.statusLabel).foregroundStyle(.secondary)
+                                        Button("修正信息") { editUnscheduled(item) }
+                                    }.font(.system(size: 12))
+                                }
+                            }.padding(.top, 8)
+                        }
+                    }
                     if page == "记录明细" { timeline }
                     else { chartSection }
                     HStack(alignment: .top, spacing: 12) {
@@ -48,7 +64,7 @@ struct JourneyView: View {
                 }.padding(28)
             }
             Divider()
-            Text("北京时间 · 周一至周日，按安排日期归周。已完成需手动确认；全部安排包含待办、取消和未通过，不等于参加次数。\(store.unscheduled.count) 项时间待通知未计入。")
+            Text("北京时间 · 周一至周日，按安排日期归周。已完成需手动确认；全部安排包含待办、取消和未通过，不等于参加次数。\(store.unscheduled.count) 项时间或信息待补记录单独保留，未计入图表。")
                 .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 28).padding(.vertical, 14).fixedSize(horizontal: false, vertical: true)
         }.frame(minWidth: 740, minHeight: 560).background(canvas).preferredColorScheme(.dark)
         .onChange(of: range) { _ in selectedWeek = nil }

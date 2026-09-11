@@ -65,6 +65,11 @@ struct UnscheduledEvent: Identifiable, Codable {
     var location: String? = nil
     var link: String? = nil
     var createdAt = Date()
+    // Optional fields keep records written by older versions readable.
+    var status: EventStatus? = nil
+    var isDeadline: Bool? = nil
+    var recordStatus: EventStatus { status ?? .pending }
+    var statusLabel: String { recordStatus == .pending ? "时间待通知" : recordStatus.rawValue }
     var displayCompany: String { company.isEmpty ? "公司待确认" : company }
     var displayTime: String {
         if day.isEmpty { return "日期与时间待通知" }
