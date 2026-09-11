@@ -198,6 +198,7 @@ import Combine
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.mainMenu = ApplicationMenu.make()
         UNUserNotificationCenter.current().delegate = self
         createStatusItem(resetPosition: !UserDefaults.standard.bool(forKey: "compactPositionInitialized"))
         UserDefaults.standard.set(true, forKey: "compactPositionInitialized")
