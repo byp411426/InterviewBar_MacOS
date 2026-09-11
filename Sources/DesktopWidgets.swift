@@ -37,16 +37,30 @@ enum DesktopWidgetKind: String, CaseIterable { case reminder = "最近安排", s
         panel.isMovableByWindowBackground = true; panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false; panel.level = level
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 300, height: 200); panel.maxSize = NSSize(width: 520, height: 320)
+        panel.delegate = self
+        let maximum = WidgetDimensions.maximumScale(in: frame.size)
+        panel.contentMinSize = WidgetDimensions.size(scale: min(0.9, maximum))
+        panel.contentMaxSize = WidgetDimensions.size(scale: maximum)
+        panel.contentAspectRatio = WidgetDimensions.ratio
         panel.setFrameAutosaveName("InterviewBar.Widget." + type.rawValue)
         panel.setFrameUsingName("InterviewBar.Widget." + type.rawValue)
-        // Reconnect / monitor removal may leave a saved frame offscreen.
-        if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }) { panel.setFrameOrigin(NSPoint(x: frame.minX + 30, y: frame.maxY - 250)) }
-        panel.contentView = NSHostingView(rootView: DesktopWidgetView(store: store, kind: type, close: { [weak self] in self?.set(type, enabled: false) }, open: { [weak self] in
+        // Repair legacy freely stretched frames while retaining their top-left position.
+        let screen = NSScreen.screens.max { a, b in
+            let first = a.visibleFrame.intersection(panel.frame), second = b.visibleFrame.intersection(panel.frame)
+            return (first.isNull ? 0 : first.width * first.height) < (second.isNull ? 0 : second.width * second.height)
+        }?.visibleFrame ?? frame
+        panel.setFrame(WidgetDimensions.restored(panel.frame, in: screen), display: false)
+        panel.contentView = WidgetSurfaceView(rootView: DesktopWidgetView(store: store, kind: type, close: { [weak self] in self?.set(type, enabled: false) }, open: { [weak self] in
             guard let self else { return }
             if type == .statistics { openJourney() } else { openEvent(store.next) }
         }))
+        panel.saveFrame(usingName: "InterviewBar.Widget." + type.rawValue)
         panels[type] = panel; panel.orderFrontRegardless()
+    }
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel, let type = panels.first(where: { $0.value === panel })?.key else { return }
+        panel.saveFrame(usingName: "InterviewBar.Widget." + type.rawValue)
+        panel.invalidateShadow()
     }
     func publishSnapshot() {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "InterviewBarWidgetGroup") as? String,
@@ -63,21 +77,16 @@ enum DesktopWidgetKind: String, CaseIterable { case reminder = "最近安排", s
         } catch { store.error = "原生小组件快照更新失败：" + error.localizedDescription }
     }
 }
-private struct GlassMaterial: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView(); view.material = .hudWindow
-        view.blendingMode = .behindWindow; view.state = .active; return view
-    }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
-}
 struct DesktopWidgetView: View {
     @ObservedObject var store: EventStore
     let kind: DesktopWidgetKind
     let close: () -> Void
     let open: () -> Void
     var body: some View {
-        TimelineView(.periodic(from: .now, by: kind == .reminder ? 1 : 30)) { context in
-            VStack(alignment: .leading, spacing: 14) {
+        GeometryReader { geometry in
+            let scale = min(geometry.size.width / WidgetDimensions.base.width, geometry.size.height / WidgetDimensions.base.height)
+            TimelineView(.periodic(from: .now, by: kind == .reminder ? 1 : 30)) { context in
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Label(kind.rawValue, systemImage: kind == .reminder ? "calendar.badge.clock" : "chart.bar.xaxis").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                     Spacer()
@@ -90,13 +99,16 @@ struct DesktopWidgetView: View {
                     Spacer()
                     Button(action: open) { Image(systemName: "arrow.up.right").frame(width: 24, height: 22) }.buttonStyle(.plain).accessibilityLabel(kind == .reminder ? "查看最近安排" : "打开统计图")
                 }
-            }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(GlassMaterial()).background(Color.primary.opacity(0.025))
-            .clipShape(RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(.white.opacity(0.28), lineWidth: 1))
+            }.padding(18)
+            .frame(width: WidgetDimensions.base.width, height: WidgetDimensions.base.height, alignment: .topLeading)
+            .background(LinearGradient(colors: [.white.opacity(0.10), .white.opacity(0.015)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+            }
         }
     }
     @ViewBuilder private func reminder(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
         if let event = store.pending.first(where: { $0.date > now }) {
             Text(event.company).font(.system(size: 22, weight: .semibold)).lineLimit(1)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -108,6 +120,7 @@ struct DesktopWidgetView: View {
             Text("暂时没有新安排").font(.system(size: 22, weight: .medium))
             Text("重要时间记下来，留一点空间给生活。").font(.system(size: 12)).foregroundStyle(.secondary)
         }
+    }
     }
     private func statistics(now: Date) -> some View {
         let snapshot = WidgetSnapshot.make(events: store.events, now: now)
@@ -140,7 +153,7 @@ struct WidgetSettingsView: View {
             Toggle("显示本周统计", isOn: Binding(get: { widgets.statistics }, set: { widgets.set(.statistics, enabled: $0) }))
             Divider()
             Toggle("置于其他窗口上方", isOn: Binding(get: { widgets.floating }, set: { widgets.setFloating($0) }))
-            Text("关闭置顶时留在桌面层；开启后可在工作窗口上方查看。拖动空白处调整位置，拖边缘调整大小。显示状态和位置会记住。").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("关闭置顶时留在桌面层；开启后可在工作窗口上方查看。拖动空白处调整位置；拖边缘或角等比例缩放，圆角、文字和间距同步缩放。大小、位置和显示状态会记住。").font(.system(size: 12)).foregroundStyle(.secondary)
             Text(Bundle.main.object(forInfoDictionaryKey: "InterviewBarWidgetGroup") != nil ? "原生扩展已随应用安装。打开系统“编辑小组件”，搜索面试日程；数据通过本机共享容器同步。" : "这是应用提供的桌面组件。系统“编辑小组件”中的原生版本需要另行签名安装 WidgetKit 扩展；当前临时签名安装包不提供该入口。").font(.system(size: 12)).foregroundStyle(.secondary)
             Spacer()
         }.padding(26).frame(width: 490, height: 370)
