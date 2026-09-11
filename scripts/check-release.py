@@ -15,7 +15,7 @@ patterns = {
     'private Feishu sheet': re.compile(rb'https://[^\s"<>]*feishu\.cn/sheets/[A-Za-z0-9]{15,}'),
     'private webmail': re.compile(rb'[A-Za-z0-9_.+-]+@(?:163|126|qq|gmail|outlook)\.com'),
 }
-private_names = {'events.json', 'application-sheet.json', 'application-results.json',
+private_names = {'widget-snapshot.json', 'events.json', 'application-sheet.json', 'application-results.json',
                  'unscheduled-events.json', 'import-history.json', 'import-transaction.json'}
 errors = []
 count = 0

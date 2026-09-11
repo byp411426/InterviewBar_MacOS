@@ -38,6 +38,7 @@ struct SettingsView: View {
     var export: () -> Void
     var quit: () -> Void
     var modelSettings: () -> Void
+    var widgetSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -63,7 +64,7 @@ struct SettingsView: View {
                 Text(store.reminderMessage).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             if let error = runtime.error { Text(error).font(.system(size: 12)).foregroundStyle(.red) }
-            Button("邮件识别模型设置…", action: modelSettings)
+            HStack { Button("邮件识别模型设置…", action: modelSettings); Button("桌面小组件…", action: widgetSettings) }
             Spacer(minLength: 0)
             HStack {
                 Button("导出 CSV", action: export)

@@ -182,6 +182,8 @@ import Combine
     var editor: NSWindow?
     var workspace: NSWindow?
     var journeyWindow: NSWindow?
+    var widgetSettingsWindow: NSWindow?
+    lazy var widgets = DesktopWidgets(store: store)
     var settingsWindow: NSWindow?
     var mailWindow: NSWindow?
     var modelWindow: NSWindow?
@@ -204,7 +206,7 @@ import Combine
         popover.contentSize = panelSize.size
         panelSize.resized = { [weak self] size in self?.popover.contentSize = size; self?.writeRuntimeStatus() }
         popover.contentViewController = NSHostingController(rootView: Dashboard(store: store, sizing: panelSize, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }, openWorkspace: { [weak self] in self?.showWorkspace() }, openSettings: { [weak self] in self?.showSettings() }, openJourney: { [weak self] in self?.showJourney() }, importMail: { [weak self] in self?.showMailImport(MailCapture(text: NSPasteboard.general.string(forType: .string) ?? "")) }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
-        subscription = store.$events.sink { [weak self] _ in DispatchQueue.main.async { self?.updateTitle() } }
+        subscription = store.$events.sink { [weak self] _ in DispatchQueue.main.async { self?.updateTitle(); self?.widgets.publishSnapshot() } }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.now = Date(); self?.updateTitle() }
         }
@@ -214,6 +216,9 @@ import Combine
         NotificationCenter.default.addObserver(self, selector: #selector(wake(_:)), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         runtime.refresh()
         if CommandLine.arguments.contains("--enable-login-item") { runtime.setLoginEnabled(true) }
+        widgets.openJourney = { [weak self] in self?.showJourney() }
+        widgets.openEvent = { [weak self] in self?.showEditor($0) }
+        widgets.restore(); widgets.publishSnapshot()
         updateTitle(); store.schedule()
         // Login launches stay quiet. Opening the installed app again invokes reopen.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.verifyPlacement() }
@@ -302,7 +307,10 @@ import Combine
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
     @objc func receiveURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-              let url = URLComponents(string: string), url.scheme == "interviewbar", url.host == "import",
+              let url = URLComponents(string: string), url.scheme == "interviewbar" else { return }
+        if url.host == "journey" { showJourney(); return }
+        if url.host == "next" { showEditor(store.next); return }
+        guard url.host == "import",
               let id = url.queryItems?.first(where: { $0.name == "id" })?.value.flatMap(UUID.init(uuidString:)) else { return }
         let file = store.repository.url.deletingLastPathComponent().appendingPathComponent("mail-inbox/\(id.uuidString).json")
         do {
@@ -335,15 +343,22 @@ import Combine
         window.contentView = NSHostingView(rootView: SettingsView(store: store, runtime: runtime, resetPosition: { [weak self] in
             self?.createStatusItem(resetPosition: true); self?.updateTitle()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.writeRuntimeStatus() }
-        }, export: { [weak self] in self?.exportData() }, quit: { NSApp.terminate(nil) }, modelSettings: { [weak self] in self?.showModelSettings() }))
+        }, export: { [weak self] in self?.exportData() }, quit: { NSApp.terminate(nil) }, modelSettings: { [weak self] in self?.showModelSettings() }, widgetSettings: { [weak self] in self?.showWidgetSettings() }))
         settingsWindow = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+    }
+    func showWidgetSettings() {
+        if let widgetSettingsWindow { NSApp.activate(ignoringOtherApps: true); widgetSettingsWindow.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 370), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "桌面小组件"; window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: WidgetSettingsView(widgets: widgets))
+        widgetSettingsWindow = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
     func showJourney() {
         popover.performClose(nil)
         if let journeyWindow { NSApp.activate(ignoringOtherApps: true); journeyWindow.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "我的秋招之旅"; window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 740, height: 570)
+        window.minSize = NSSize(width: 780, height: 620)
         window.contentView = NSHostingView(rootView: JourneyView(store: store, edit: { [weak self] in self?.showEditor($0) }))
         journeyWindow = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
