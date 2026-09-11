@@ -373,8 +373,8 @@ import Combine
     }
     func showModelSettings() {
         if let modelWindow { NSApp.activate(ignoringOtherApps: true); modelWindow.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 400), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "模型设置 · 面试日程"; window.isReleasedWhenClosed = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 740, height: 660), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "AI 服务与用量 · 面试日程"; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: ModelSettingsView())
         modelWindow = window; window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
     }
@@ -425,6 +425,7 @@ import Combine
                 guard let key = readLine(strippingNewline: true) else { throw DataError.invalid("未收到密钥。") }
                 try ModelKeychain.save(key, configuration: .current); try ModelConfiguration.current.persist()
                 UserDefaults.standard.set(true, forKey: "mailModelEnabled")
+                UserDefaults.standard.set(true, forKey: "mailModelConfigured")
                 print("Model credential saved in Keychain; AI recognition enabled.")
             } catch { print(error.localizedDescription); exit(1) }
             return

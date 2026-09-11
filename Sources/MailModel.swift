@@ -2,36 +2,11 @@ import Foundation
 import Security
 import CryptoKit
 
-struct ModelConfiguration {
-    var baseURL: String
-    var model: String
-    static var current: ModelConfiguration {
-        ModelConfiguration(baseURL: UserDefaults.standard.string(forKey: "mailModelBaseURL") ?? "https://api.deepseek.com",
-                           model: UserDefaults.standard.string(forKey: "mailModelName") ?? "deepseek-flash")
-    }
-    var endpoint: URL {
-        get throws {
-            guard var url = URLComponents(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme == "https", url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { throw DataError.invalid("模型地址必须是完整的 HTTPS 地址。") }
-            let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if path.isEmpty { url.path = "/v1/chat/completions" }
-            else if !path.hasSuffix("chat/completions") { url.path = "/" + path + "/chat/completions" }
-            guard let endpoint = url.url else { throw DataError.invalid("模型地址无效。") }
-            return endpoint
-        }
-    }
-    func persist() throws {
-        _ = try endpoint
-        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DataError.invalid("请填写模型名称。") }
-        UserDefaults.standard.set(baseURL, forKey: "mailModelBaseURL")
-        UserDefaults.standard.set(model, forKey: "mailModelName")
-    }
-}
-
 enum ModelKeychain {
     static func query(_ configuration: ModelConfiguration) throws -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: (Bundle.main.bundleIdentifier ?? "app.interviewbar.macos") + ".mail-model",
-         kSecAttrAccount as String: try configuration.endpoint.host!]
+         kSecAttrAccount as String: try configuration.endpoint.absoluteString]
     }
     static func save(_ key: String, configuration: ModelConfiguration) throws {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -49,7 +24,14 @@ enum ModelKeychain {
     static func read(configuration: ModelConfiguration) throws -> String {
         var match = try query(configuration); match[kSecReturnData as String] = true; match[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(match as CFDictionary, &result)
+        var status = SecItemCopyMatching(match as CFDictionary, &result)
+        // Legacy keys were host-scoped. Only the currently saved endpoint may migrate them.
+        let legacy = UserDefaults.standard.string(forKey: "legacyModelEndpoint")
+            ?? (UserDefaults.standard.string(forKey: "mailModelBaseURL") == nil ? "" : ((try? ModelConfiguration.current.endpoint.absoluteString) ?? ""))
+        if status == errSecItemNotFound, (try? configuration.endpoint.absoluteString) == legacy {
+            match[kSecAttrAccount as String] = try configuration.endpoint.host!
+            status = SecItemCopyMatching(match as CFDictionary, &result)
+        }
         guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
             throw DataError.invalid(status == errSecItemNotFound ? "请先在模型设置中保存 API 密钥。" : "无法读取钥匙串（\(status)），请在模型设置中重新保存密钥。")
         }
@@ -83,10 +65,11 @@ actor MailModelCache {
     static let shared = MailModelCache()
     private var entries: [String: (Date, MailDraft)] = [:]
     static func key(_ capture: MailCapture, configuration: ModelConfiguration) throws -> String {
-        let fields = [capture.text, dateText(capture.capturedAt, "yyyy-MM-dd"), try configuration.endpoint.absoluteString, configuration.model, MailModel.prompt]
+        let fields = [capture.text, dateText(capture.capturedAt, "yyyy-MM-dd"), try configuration.endpoint.absoluteString, configuration.model, configuration.adapter.rawValue, String(configuration.jsonOutput), MailModel.prompt]
         let data = try JSONEncoder().encode(fields)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
+    func clear() { entries.removeAll() }
     func value(_ key: String, now: Date = Date()) -> MailDraft? {
         guard let entry = entries[key], now.timeIntervalSince(entry.0) < 600 else { entries[key] = nil; return nil }
         return entry.1
@@ -146,35 +129,71 @@ enum MailModel {
         return draft
     }
     static func requestBody(_ capture: MailCapture, configuration: ModelConfiguration, fast: Bool = true) -> [String: Any] {
-        var body: [String: Any] = ["model": configuration.model, "stream": false, "temperature": 0.1, "max_tokens": 2000,
-            "response_format": ["type": "json_object"], "messages": [["role": "system", "content": prompt], ["role": "user", "content": "邮件参考日期（不是考试日期）：\(dateText(capture.capturedAt, "yyyy-MM-dd EEEE"))\n<mail>\n\(capture.text)\n</mail>"]]]
-        if fast && (configuration.model.lowercased().hasPrefix("deepseek-v4") || configuration.model.lowercased() == "deepseek-flash") { body["thinking"] = ["type": "disabled"] }
+        var body: [String: Any] = ["model": configuration.model.trimmingCharacters(in: .whitespacesAndNewlines), "stream": false, "max_tokens": 2000,
+            "messages": [["role": "system", "content": prompt], ["role": "user", "content": "邮件参考日期（不是考试日期）：\(dateText(capture.capturedAt, "yyyy-MM-dd EEEE"))\n<mail>\n\(capture.text)\n</mail>"]]]
+        if configuration.jsonOutput { body["response_format"] = ["type": "json_object"] }
+        // Kimi models constrain temperature; let the service choose its supported default.
+        if configuration.adapter != .kimi { body["temperature"] = 0.1 }
+        if fast {
+            switch configuration.adapter {
+            case .qwen: body["enable_thinking"] = false
+            case .deepseek, .kimi, .glm: body["thinking"] = ["type": "disabled"]
+            case .custom: break
+            }
+        }
         return body
     }
-    static func recognize(_ capture: MailCapture, configuration: ModelConfiguration = .current, bypassCache: Bool = false, fast: Bool = true) async throws -> MailDraft {
+    typealias Transport = (URLRequest) async throws -> (Data, URLResponse)
+    static func recognize(_ capture: MailCapture, configuration: ModelConfiguration = .current, bypassCache: Bool = false,
+                          fast: Bool = true, credential: String? = nil, purpose: ModelCallPurpose = .mail,
+                          ledger: ModelUsageLedger = .shared, transport: Transport? = nil) async throws -> MailDraft {
         guard !capture.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, capture.text.utf8.count <= 60_000 else { throw DataError.invalid("请粘贴邮件正文，最多约2万个汉字。") }
+        try configuration.validate()
         try Task.checkCancellation()
         let cacheKey = try MailModelCache.key(capture, configuration: configuration)
-        if !bypassCache && fast, let cached = await MailModelCache.shared.value(cacheKey) { return cached }
-        let key = try ModelKeychain.read(configuration: configuration)
+        if !bypassCache && fast && purpose == .mail, let cached = await MailModelCache.shared.value(cacheKey) {
+            try? await ledger.append(.init(configuration: configuration, purpose: purpose, status: .local))
+            return cached
+        }
+        let key = try credential ?? ModelKeychain.read(configuration: configuration)
+        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DataError.invalid("请输入 API 密钥。") }
         var request = URLRequest(url: try configuration.endpoint); request.httpMethod = "POST"; request.timeoutInterval = 75
-        request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer " + key.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody(capture, configuration: configuration, fast: fast))
         let settings = URLSessionConfiguration.ephemeral; settings.timeoutIntervalForResource = 90; settings.httpCookieStorage = nil; settings.urlCache = nil
         let session = URLSession(configuration: settings, delegate: NoModelRedirects(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw DataError.invalid("模型服务没有返回有效响应。") }
-        guard http.statusCode == 200 else {
-            let explanation: String
-            switch http.statusCode { case 401, 403: explanation = "密钥无效或无权使用此模型"; case 429: explanation = "请求限流或额度不足，请稍后重试"; case 300..<400: explanation = "服务要求跳转，已停止发送，请核对模型地址"; default: explanation = "模型服务请求失败，请核对地址、模型及账户额度" }
-            throw DataError.invalid("\(explanation)（HTTP \(http.statusCode)）。")
+        let started = Date()
+        var usage = ModelTokenUsage.parse(nil)
+        var httpStatus: Int?
+        do {
+            let (data, response): (Data, URLResponse)
+            if let transport { (data, response) = try await transport(request) }
+            else { (data, response) = try await session.data(for: request) }
+            guard let http = response as? HTTPURLResponse else { throw DataError.invalid("模型服务没有返回有效响应。") }
+            httpStatus = http.statusCode
+            let result = data.count < 500_000 ? (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] : nil
+            usage = ModelTokenUsage.parse(result?["usage"])
+            guard http.statusCode == 200 else {
+                let explanation: String
+                switch http.statusCode { case 401, 403: explanation = "密钥无效或无权使用此模型"; case 429: explanation = "请求限流或额度不足，请稍后重试"; case 300..<400: explanation = "服务要求跳转，已停止发送，请核对模型地址"; default: explanation = "模型服务请求失败，请核对地址、模型及账户额度" }
+                throw DataError.invalid("\(explanation)（HTTP \(http.statusCode)）。")
+            }
+            guard let choices = result?["choices"] as? [[String: Any]], let choice = choices.first,
+                  choice["finish_reason"] as? String != "length", let message = choice["message"] as? [String: Any], let content = message["content"] as? String else { throw DataError.invalid("模型输出为空、不完整或格式不支持，未保存任何日程。") }
+            try Task.checkCancellation()
+            let draft = try decode(content, source: capture.text)
+            if fast && purpose == .mail { await MailModelCache.shared.put(draft, key: cacheKey) }
+            try? await ledger.append(.init(configuration: configuration, purpose: purpose, status: .success,
+                seconds: Date().timeIntervalSince(started), httpStatus: httpStatus, tokens: usage, forced: bypassCache))
+            return draft
+        } catch {
+            let cancelled = Task.isCancelled || (error as? URLError)?.code == .cancelled || error is CancellationError
+            try? await ledger.append(.init(configuration: configuration, purpose: purpose, status: cancelled ? .cancelled : .failure,
+                seconds: Date().timeIntervalSince(started), httpStatus: httpStatus, tokens: usage, forced: bypassCache))
+            // Do not expose arbitrary provider response bodies or request URLs in errors.
+            if error is URLError { throw DataError.invalid(cancelled ? "已取消请求。" : "网络请求失败或超时，请检查连接与服务地址。") }
+            throw error
         }
-        guard data.count < 500_000, let result = try JSONSerialization.jsonObject(with: data) as? [String: Any], let choices = result["choices"] as? [[String: Any]], let choice = choices.first,
-              choice["finish_reason"] as? String != "length", let message = choice["message"] as? [String: Any], let content = message["content"] as? String else { throw DataError.invalid("模型输出为空、不完整或格式不支持，未保存任何日程。") }
-        try Task.checkCancellation()
-        let draft = try decode(content, source: capture.text)
-        if fast { await MailModelCache.shared.put(draft, key: cacheKey) }
-        return draft
     }
 }

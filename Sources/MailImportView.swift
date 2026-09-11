@@ -11,7 +11,9 @@ struct MailImportView: View {
     @State private var error: String?
     @State private var saved = false
     @State private var sheet: SheetSnapshot?
-    @State private var useModel = UserDefaults.standard.bool(forKey: "mailModelEnabled")
+    @State private var useModel = ModelConfiguration.enabled
+    @State private var showingModelSettings = false
+    @State private var modelConfiguration = ModelConfiguration.current
     @State private var analyzing = false
     @State private var analysisReady = false
     @State private var requestID = UUID()
@@ -56,6 +58,9 @@ struct MailImportView: View {
             capture.text = input; draft = MailParser.parse(input, knownCompanies: store.events.map(\.company))
             analysisReady = true; analyzing = false; pickMatches(); return
         }
+        guard ModelConfiguration.isConfigured else {
+            analyzing = false; error = "第一次使用，请点击右上角“AI 设置与用量”，选择服务商并保存自己的密钥。"; showingModelSettings = true; return
+        }
         analyzing = true; startedAt = Date(); elapsed = nil
         var candidate = capture; candidate.text = input
         requestTask = Task { @MainActor in
@@ -79,6 +84,7 @@ struct MailImportView: View {
                     Text(useModel ? "AI 提取字段 · 未知项留空 · 核对后才保存" : "本机规则识别 · 未知项可留空保存").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("AI 设置与用量") { showingModelSettings = true }
             }
             HStack(alignment: .top, spacing: 22) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -90,7 +96,7 @@ struct MailImportView: View {
                         if analyzing { Button("停止识别") { cancelRecognition() } }
                         else { Button("重新识别") { recognize(force: true) } }
                     }
-                    Text(useModel ? "使用 \(ModelConfiguration.current.model)。点击识别会将这段正文发给 \((try? ModelConfiguration.current.endpoint.host) ?? "配置的模型服务")；API 密钥保存在本机钥匙串。" : "仅使用本机规则，不向模型服务发送邮件。").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(useModel ? "使用 \(modelConfiguration.model)。点击识别会将这段正文发给 \((try? modelConfiguration.endpoint.host) ?? "配置的模型服务")；API 密钥保存在本机钥匙串。" : "仅使用本机规则，不向模型服务发送邮件。").font(.system(size: 11)).foregroundStyle(.secondary)
                 }.frame(width: 335)
                 Divider()
                 ScrollView {
@@ -159,6 +165,12 @@ struct MailImportView: View {
                 }.buttonStyle(.borderedProminent).tint(accent).disabled(saved || analyzing || (useModel && !analysisReady))
             }
         }.padding(24).frame(width: 860, height: 670)
+            .sheet(isPresented: $showingModelSettings) { ModelSettingsView(close: { showingModelSettings = false }) }
+            .onReceive(NotificationCenter.default.publisher(for: .modelConfigurationChanged)) { _ in
+                requestTask?.cancel(); requestID = UUID(); analyzing = false; analysisReady = false
+                modelConfiguration = .current
+                error = "AI 设置已更新。点击“重新识别”使用新配置。"
+            }
             .onAppear { readSheet(); if !analysisReady && !analyzing && !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { recognize() } }
             .onChange(of: draft.company) { _ in pickMatches() }
             .onChange(of: useModel) { _ in recognize(force: true) }

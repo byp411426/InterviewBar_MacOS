@@ -64,7 +64,7 @@ struct SettingsView: View {
                 Text(store.reminderMessage).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             if let error = runtime.error { Text(error).font(.system(size: 12)).foregroundStyle(.red) }
-            HStack { Button("邮件识别模型设置…", action: modelSettings); Button("桌面小组件…", action: widgetSettings) }
+            HStack { Button("AI 服务与用量…", action: modelSettings); Button("桌面小组件…", action: widgetSettings) }
             Spacer(minLength: 0)
             HStack {
                 Button("导出 CSV", action: export)

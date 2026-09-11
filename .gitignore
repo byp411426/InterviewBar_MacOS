@@ -20,3 +20,6 @@ mail-captures/
 mail-inbox/
 mail-import-backups/
 widget-snapshot.json
+
+model-usage.json
+model-usage.json.lock
