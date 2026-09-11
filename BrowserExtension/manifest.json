@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "面试日程 · 邮件采集",
+  "version": "0.4.0",
+  "description": "选中或粘贴招聘邮件文字，交给本机面试日程核对后保存。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAiuaSH0llQWD1F9wMpBHUBO9pXji6D2ovM6FRzZN7tkNLFAUuR/SrP8Wh0B0BwXPR6QzSYKD8VgtSJ8NwZX+Cn75zg0J8PMR5UTEcEPmEhXB4P8nwmuigDHvFmYTPgi1qk+Hcavdgkr+wEcoHIzyynD/7fp4qDMZifClTj2kKqMEtoKJPpLagUXnSqpR6/EMFCWBN3oDHny88ScRww7toKYYZwyWEbLZJOBTsPlxekceVMP8oeBf/B5+oipIuWmOg0iWMvfy/8dSpo22Lj0cXvRcU5+IfEq8q9z/WhwWwPZY1KKM54nm9zAvOntv3+I7NfU2d5OkoxmxTXNMyaA8DrQIDAQAB",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "加入面试日程",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icon.png"
+    }
+  },
+  "icons": {
+    "32": "icon.png"
+  }
+}

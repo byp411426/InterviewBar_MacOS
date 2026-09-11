@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>加入面试日程</title><link rel="stylesheet" href="popup.css"></head>
+<body><h1>加入面试日程</h1><p class="intro">选中邮件正文，或在下面粘贴已复制的文字。</p>
+<p id="connection" role="status">正在连接 Mac 应用…</p>
+<textarea id="text" aria-label="邮件正文" placeholder="在这里按 ⌘V 粘贴邮件正文"></textarea>
+<div class="actions"><button id="selection">读取选中文字</button><button id="send">识别并送到应用</button></div>
+<p id="message" role="status"></p><p class="note">只在你点击时采集。正文交给 Mac 应用识别；启用 AI 时会发送给配置的模型服务，确认后才保存。也可选中文字后右键 → 加入面试日程。</p>
+<script src="popup.js"></script></body></html>
