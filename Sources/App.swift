@@ -12,6 +12,8 @@ import Combine
     @Published var remindersEnabled = UserDefaults.standard.bool(forKey: "remindersEnabled")
     @Published var reminderMessage = "本机提醒尚未开启"
     private var writable = true
+    private var diskEvents: Data?
+    private var diskUnscheduled: Data?
     private var scheduleTask: Task<Void, Never>?
     private let notificationsAllowed: Bool
     let repository: EventRepository
@@ -30,6 +32,34 @@ import Combine
             do { unscheduled = try JSONDecoder().decode([UnscheduledEvent].self, from: Data(contentsOf: pendingFile)) }
             catch { self.error = "待通知安排读取失败：\(error.localizedDescription)"; writable = false }
         }
+        if writable {
+            diskEvents = try? Data(contentsOf: repository.url)
+            diskUnscheduled = try? Data(contentsOf: pendingFile)
+        }
+    }
+    @discardableResult func refreshFromDisk() -> Bool {
+        let pendingFile = repository.url.deletingLastPathComponent().appendingPathComponent("unscheduled-events.json")
+        do {
+            let currentEvents = try Data(contentsOf: repository.url)
+            let currentUnscheduled = FileManager.default.fileExists(atPath: pendingFile.path) ? try Data(contentsOf: pendingFile) : nil
+            if writable && currentEvents == diskEvents && currentUnscheduled == diskUnscheduled { return true }
+            let loadedEvents = try repository.load()
+            let loadedUnscheduled = try currentUnscheduled.map { try JSONDecoder().decode([UnscheduledEvent].self, from: $0) } ?? []
+            guard Set(loadedUnscheduled.map(\.id)).count == loadedUnscheduled.count else {
+                throw DataError.invalid("待确认安排中存在重复标识，原文件已保留。")
+            }
+            events = loadedEvents
+            unscheduled = loadedUnscheduled
+            diskEvents = currentEvents
+            diskUnscheduled = currentUnscheduled
+            writable = true
+            schedule()
+            return true
+        } catch {
+            self.error = "重新读取日程失败，原文件已保留：\(error.localizedDescription)"
+            writable = false
+            return false
+        }
     }
     func loadResults() {
         let file = repository.url.deletingLastPathComponent().appendingPathComponent("application-results.json")
@@ -38,6 +68,7 @@ import Combine
         catch { self.error = "读取投递结果失败：\(error.localizedDescription)" }
     }
     func importMail(_ draft: MailDraft, capture: MailCapture, targetID: UUID?, expectedRow: [String]?) throws {
+        guard refreshFromDisk() else { throw DataError.invalid("数据读取失败，请先处理错误再导入。") }
         guard writable else { throw DataError.invalid("数据读取失败，请先处理错误再导入。") }
         let directory = repository.url.deletingLastPathComponent()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -109,17 +140,21 @@ import Combine
             throw error
         }
         events = updated; results = updatedResults; unscheduled = updatedUnscheduled; schedule()
+        diskEvents = try? Data(contentsOf: repository.url)
+        diskUnscheduled = try? Data(contentsOf: directory.appendingPathComponent("unscheduled-events.json"))
         NotificationCenter.default.post(name: .mailImportCommitted, object: nil)
     }
     var pending: [InterviewEvent] { events.filter { $0.status == .pending }.sorted { $0.date < $1.date } }
     var next: InterviewEvent? { pending.first { $0.date >= now } }
     @discardableResult func setUnscheduledStatus(_ id: UUID, _ status: EventStatus) -> Bool {
-        guard let index = unscheduled.firstIndex(where: { $0.id == id }) else { return false }
+        guard refreshFromDisk() else { return false }
+        guard let index = unscheduled.firstIndex(where: { $0.id == id }) else { error = "这条待确认记录已变化，请重新打开日程。"; return false }
         var updated = unscheduled
         updated[index].status = status
         return commitUnscheduled(updated)
     }
     @discardableResult func saveUnscheduled(_ item: UnscheduledEvent) -> Bool {
+        guard refreshFromDisk() else { return false }
         guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
         guard let index = unscheduled.firstIndex(where: { $0.id == item.id }) else { error = "这条记录已变化，请重新打开。"; return false }
         do {
@@ -138,6 +173,8 @@ import Combine
                     throw error
                 }
                 events = newEvents; unscheduled = updated; schedule()
+                diskEvents = try? Data(contentsOf: repository.url)
+                diskUnscheduled = try? Data(contentsOf: directory.appendingPathComponent("unscheduled-events.json"))
                 return true
             }
             updated[index] = clean
@@ -145,8 +182,12 @@ import Combine
         } catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
     }
     @discardableResult func deleteUnscheduled(_ id: UUID) -> Bool {
+        guard refreshFromDisk() else { return false }
         guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
-        guard unscheduled.contains(where: { $0.id == id }) else { return true }
+        guard unscheduled.contains(where: { $0.id == id }) else {
+            if events.contains(where: { $0.id == id }) { error = "这条记录已转为正式日程，请在当前日程中操作。"; return false }
+            return true
+        }
         let updated = unscheduled.filter { $0.id != id }
         return commitUnscheduled(updated)
     }
@@ -157,10 +198,12 @@ import Combine
             let url = repository.url.deletingLastPathComponent().appendingPathComponent("unscheduled-events.json")
             try encoder.encode(updated).write(to: url, options: .atomic)
             unscheduled = updated
+            diskUnscheduled = try? Data(contentsOf: url)
             return true
         } catch { self.error = "保存失败，记录已保留：\(error.localizedDescription)"; return false }
     }
     @discardableResult func save(_ event: InterviewEvent) -> Bool {
+        guard refreshFromDisk() else { return false }
         do {
             let clean = try event.validated()
             var updated = events
@@ -170,7 +213,7 @@ import Combine
     }
     @discardableResult func commit(_ updated: [InterviewEvent]) -> Bool {
         guard writable else { error = "日程文件未成功读取，请先备份并检查原文件。"; return false }
-        do { try repository.save(updated); events = updated; schedule(); return true }
+        do { try repository.save(updated); events = updated; diskEvents = try? Data(contentsOf: repository.url); schedule(); return true }
         catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
     }
     func setStatus(_ event: InterviewEvent, _ status: EventStatus) { var updated = event; updated.status = status; save(updated) }
@@ -256,7 +299,7 @@ import Combine
         popover.contentViewController = NSHostingController(rootView: Dashboard(store: store, sizing: panelSize, edit: { [weak self] in self?.showEditor($0) }, export: { [weak self] in self?.exportData() }, openWorkspace: { [weak self] in self?.showWorkspace() }, openSettings: { [weak self] in self?.showSettings() }, openJourney: { [weak self] in self?.showJourney() }, importMail: { [weak self] in self?.showMailImport(MailCapture(text: NSPasteboard.general.string(forType: .string) ?? "")) }, editUnscheduled: { [weak self] in self?.showUnscheduledEditor($0) }).environment(\.locale, Locale(identifier: "zh_CN")).environment(\.timeZone, shanghai))
         subscription = store.$events.sink { [weak self] _ in DispatchQueue.main.async { self?.updateTitle(); self?.widgets.publishSnapshot() } }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.store.now = Date(); self?.updateTitle() }
+            Task { @MainActor in self?.store.refreshFromDisk(); self?.store.now = Date(); self?.updateTitle() }
         }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake(_:)), name: name, object: nil)
@@ -341,6 +384,7 @@ import Combine
     @objc func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
     func show() {
         guard let button = item.button else { return }
+        store.refreshFromDisk()
         store.now = Date(); NSApp.activate(ignoringOtherApps: true)
         if let screen = button.window?.screen {
             let anchor = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? screen.visibleFrame

@@ -73,6 +73,20 @@ import Foundation
         assert(edits.setUnscheduledStatus(closedID, .completed))
         try edits.importMail(known, capture: MailCapture(text: "不同正文的新预通知"), targetID: nil, expectedRow: nil)
         assert(edits.unscheduled.count == 2 && edits.unscheduled[0].id == closedID && edits.unscheduled[0].recordStatus == .completed)
+        // A long-running menu-bar process must drop a stale pending row when another instance promotes it.
+        let staleDirectory = directory.appendingPathComponent("stale-instance")
+        let firstInstance = EventStore(directory: staleDirectory, notificationsAllowed: false)
+        try firstInstance.importMail(unknown, capture: MailCapture(text: "待确认面试"), targetID: nil, expectedRow: nil)
+        let staleID = firstInstance.unscheduled[0].id
+        let secondInstance = EventStore(directory: staleDirectory, notificationsAllowed: false)
+        var promoted = secondInstance.unscheduled[0]
+        promoted.company = "示例公司"; promoted.kind = .interview
+        promoted.day = "2028-09-16"; promoted.time = "11:00"; promoted.timing = .exact
+        assert(secondInstance.saveUnscheduled(promoted))
+        assert(firstInstance.refreshFromDisk())
+        assert(firstInstance.unscheduled.isEmpty && firstInstance.events.contains(where: { $0.id == staleID && $0.company == "示例公司" }))
+        assert(!firstInstance.deleteUnscheduled(staleID))
+        assert(firstInstance.events.contains(where: { $0.id == staleID }))
         print("PASS: status transitions, legacy defaults, unknown-time completion, correction, stable-ID promotion, closed-history protection, deletion, persistence, write failure and corrupt-file protection")
     }
 }
