@@ -26,7 +26,8 @@ import Foundation
         try store.importMail(empty, capture: MailCapture(text: "未知公司未知时间测试"), targetID: nil, expectedRow: nil)
         assert(store.unscheduled.last?.company == "" && store.unscheduled.last?.day == "")
         let exact = try MailModel.decode(#"{"company":"示例智能","kind":"exam","date":"2026-09-15","time":"14:30","timing":"exact","isDeadline":false,"rejected":false}"#, source: "笔试2026-09-15 14:30")
-        try store.importMail(exact, capture: MailCapture(text: "示例智能确定时间测试"), targetID: nil, expectedRow: nil)
+        let pendingID = store.unscheduled.first { $0.company == draft.company }!.id
+        try store.importMail(exact, capture: MailCapture(text: "示例智能确定时间测试"), targetID: nil, expectedRow: nil, pendingTargetID: pendingID)
         assert(store.events.count == original.count + 1 && store.unscheduled.count == 1)
         let endpoint = try ModelConfiguration(baseURL: "https://api.example.com", model: "test").endpoint
         assert(endpoint.absoluteString == "https://api.example.com/v1/chat/completions")

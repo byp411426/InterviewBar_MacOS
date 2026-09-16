@@ -28,14 +28,14 @@ struct MailImportView: View {
         _capture = State(initialValue: capture); _raw = State(initialValue: capture.text)
         _draft = State(initialValue: MailParser.parse(capture.text, knownCompanies: store.events.map(\.company)))
     }
-    var eventMatches: [InterviewEvent] { store.events.filter { MailParser.companyKey($0.company) == MailParser.companyKey(draft.company) } }
+    var eventMatches: [InterviewEvent] { store.events.filter { draft.canUpdate($0) } }
+    var pendingMatches: [UnscheduledEvent] { store.unscheduled.filter { draft.canUpdate($0) } }
     var rowMatches: [Int] {
         guard !draft.company.isEmpty, let sheet, let column = sheet.columns.firstIndex(of: "公司") else { return [] }
         return sheet.rows.indices.filter { sheet.rows[$0].count == sheet.columns.count && MailParser.companyKey(sheet.rows[$0][column]) == MailParser.companyKey(draft.company) }
     }
     func pickMatches() {
-        let possible = eventMatches.filter { !draft.company.isEmpty && draft.canSchedule && $0.kind == draft.kind && (draft.round.isEmpty || $0.round == nil || $0.round == draft.round) }
-        eventID = possible.count == 1 ? possible[0].id.uuidString : ""
+        eventID = ""
         rowID = rowMatches.count == 1 ? rowMatches[0] : -1
     }
     func readSheet() {
@@ -123,10 +123,15 @@ struct MailImportView: View {
                         Divider()
                         Picker("日程处理", selection: $eventID) {
                             Text(draft.rejected ? "仅保存投递结果，不创建日程" : draft.canSchedule ? "新增一项安排" : "保存待通知安排，不设置提醒").tag("")
-                            ForEach(eventMatches) { event in Text("更新：\(event.company) \(event.kindLabel) \(dateText(event.date, "M/d HH:mm"))").tag(event.id.uuidString) }
+                            ForEach(eventMatches) { event in Text("更新同一轮待办：\(event.company) \(event.kindLabel) \(dateText(event.date, "M/d HH:mm"))").tag(event.id.uuidString) }
+                            ForEach(pendingMatches) { event in Text("补充待通知安排：\(event.company) \(event.round) \(event.displayTime)").tag("pending:" + event.id.uuidString) }
                         }
+                        Text("一面、二面、三面分别保存。新通知默认新增安排，已完成历史保留；仅同一场改期或补充信息时选择更新。").font(.system(size: 11)).foregroundStyle(.secondary)
                         if let old = eventMatches.first(where: { $0.id.uuidString == eventID }) {
                             Text("原安排：\(dateText(old.date)) · \(old.status.rawValue)\n确认后更新这条记录，保留原有备注和提醒设置。").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        if let old = pendingMatches.first(where: { "pending:" + $0.id.uuidString == eventID }) {
+                            Text("将补充这条待通知安排：\(old.displayTime)。其他轮次保留。").font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         Picker("投递表处理", selection: $rowID) {
                             Text("新增投递记录").tag(-1)
@@ -159,7 +164,8 @@ struct MailImportView: View {
                         guard raw == capture.text else { throw DataError.invalid("原文已修改，请先点击“重新识别”。") }
                         guard !capture.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DataError.invalid("请先粘贴邮件正文。") }
                         let row = rowID >= 0 ? sheet?.rows[rowID] : nil
-                        try store.importMail(draft, capture: capture, targetID: UUID(uuidString: eventID), expectedRow: row)
+                        let pendingID = eventID.hasPrefix("pending:") ? UUID(uuidString: String(eventID.dropFirst(8))) : nil
+                        try store.importMail(draft, capture: capture, targetID: UUID(uuidString: eventID), expectedRow: row, pendingTargetID: pendingID)
                         saved = true; error = nil
                     } catch { self.error = error.localizedDescription }
                 }.buttonStyle(.borderedProminent).tint(accent).disabled(saved || analyzing || (useModel && !analysisReady))
@@ -172,7 +178,7 @@ struct MailImportView: View {
                 error = "AI 设置已更新。点击“重新识别”使用新配置。"
             }
             .onAppear { readSheet(); if !analysisReady && !analyzing && !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { recognize() } }
-            .onChange(of: draft.company) { _ in pickMatches() }
+            .onChange(of: draft) { _ in pickMatches() }
             .onChange(of: useModel) { _ in recognize(force: true) }
             .onChange(of: raw) { _ in if raw != activeText { requestTask?.cancel(); requestID = UUID(); analyzing = false; analysisReady = false; saved = false } }
             .onDisappear { requestTask?.cancel(); requestID = UUID() }

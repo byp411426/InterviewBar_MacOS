@@ -67,7 +67,7 @@ import Combine
         do { results = try JSONDecoder().decode([ApplicationResult].self, from: Data(contentsOf: file)) }
         catch { self.error = "读取投递结果失败：\(error.localizedDescription)" }
     }
-    func importMail(_ draft: MailDraft, capture: MailCapture, targetID: UUID?, expectedRow: [String]?) throws {
+    func importMail(_ draft: MailDraft, capture: MailCapture, targetID: UUID?, expectedRow: [String]?, pendingTargetID: UUID? = nil) throws {
         guard refreshFromDisk() else { throw DataError.invalid("数据读取失败，请先处理错误再导入。") }
         guard writable else { throw DataError.invalid("数据读取失败，请先处理错误再导入。") }
         let directory = repository.url.deletingLastPathComponent()
@@ -77,8 +77,16 @@ import Combine
         guard history[capture.digest] == nil else { throw DataError.invalid("这段邮件文字已经导入过，无需重复保存。") }
         var updated = events, updatedResults = results, updatedUnscheduled = unscheduled
         let existingIndex = targetID.flatMap { id in updated.firstIndex { $0.id == id } }
+        let pendingIndex = pendingTargetID.flatMap { id in updatedUnscheduled.firstIndex { $0.id == id } }
+        guard targetID == nil || pendingTargetID == nil else { throw DataError.invalid("只能选择一条安排进行更新。") }
         if targetID != nil && existingIndex == nil { throw DataError.invalid("原日程已变化，请重新打开导入窗口。") }
-        if let index = existingIndex, MailParser.companyKey(updated[index].company) != MailParser.companyKey(draft.company) { throw DataError.invalid("选择的日程与公司不一致，请重新选择。") }
+        if pendingTargetID != nil && pendingIndex == nil { throw DataError.invalid("原待通知安排已变化，请重新打开导入窗口。") }
+        if let index = existingIndex, !draft.canUpdate(updated[index]) {
+            throw DataError.invalid("只能更新同公司、同岗位、同轮次的待办。已完成的面试必须保留；新一轮请选择“新增一项安排”。")
+        }
+        if let index = pendingIndex, !draft.canUpdate(updatedUnscheduled[index]) {
+            throw DataError.invalid("只能补充同公司、同岗位、同轮次的待通知安排；新一轮请新增记录。")
+        }
         let note = "\(dateText(Date(), "yyyy-MM-dd")) 用户确认邮件导入。" + (capture.title.isEmpty ? "" : "\n" + capture.title)
         if draft.rejected {
             if let index = existingIndex { updated[index].status = .rejected; updated[index].notes += "\n" + note }
@@ -94,14 +102,22 @@ import Combine
                 if event.link.isEmpty { event.link = old.link }
                 if event.location.isEmpty { event.location = old.location }
                 updated[index] = event
-            } else { event.notes = note; updated.append(event) }
-            let matches = updatedUnscheduled.indices.filter { updatedUnscheduled[$0].recordStatus == .pending && MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == draft.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
-            if matches.count == 1 { updatedUnscheduled.remove(at: matches[0]) }
+            } else {
+                event.notes = note
+                if let index = pendingIndex {
+                    let old = updatedUnscheduled.remove(at: index)
+                    event.id = old.id; event.createdAt = old.createdAt
+                    event.notes = old.notes + "\n" + note
+                    if event.role.isEmpty { event.role = old.role }
+                    if event.link.isEmpty { event.link = old.link ?? "" }
+                    if event.location.isEmpty { event.location = old.location ?? "" }
+                }
+                updated.append(event)
+            }
         } else {
             var pending = UnscheduledEvent(company: draft.company, role: draft.role, kind: draft.kindUncertain ? nil : draft.kind, round: draft.round, day: draft.day, time: draft.time, timing: draft.timing, timeNote: draft.timeNote, notes: note, location: draft.location, link: draft.link, isDeadline: draft.isDeadline)
-            let matches = updatedUnscheduled.indices.filter { !draft.company.isEmpty && updatedUnscheduled[$0].recordStatus == .pending && MailParser.companyKey(updatedUnscheduled[$0].company) == MailParser.companyKey(draft.company) && updatedUnscheduled[$0].kind == pending.kind && updatedUnscheduled[$0].role == draft.role && updatedUnscheduled[$0].round == draft.round }
-            if matches.count == 1 {
-                let index = matches[0]; pending.id = updatedUnscheduled[index].id; pending.createdAt = updatedUnscheduled[index].createdAt; pending.notes = updatedUnscheduled[index].notes + "\n" + note
+            if let index = pendingIndex {
+                pending.id = updatedUnscheduled[index].id; pending.createdAt = updatedUnscheduled[index].createdAt; pending.notes = updatedUnscheduled[index].notes + "\n" + note
                 updatedUnscheduled[index] = pending
             } else { updatedUnscheduled.append(pending) }
         }

@@ -10,7 +10,7 @@ struct MailCapture: Codable {
     var digest: String { SHA256.hash(data: Data(text.trimmingCharacters(in: .whitespacesAndNewlines).utf8)).map { String(format: "%02x", $0) }.joined() }
 }
 
-struct MailDraft {
+struct MailDraft: Equatable {
     var company = "", role = "", round = "", day = "", time = "", location = "", link = ""
     var kind = EventKind.interview
     var rejected = false
@@ -20,6 +20,23 @@ struct MailDraft {
     var kindUncertain = false
     var canSchedule: Bool { timing == .exact && !day.isEmpty && !time.isEmpty && !company.isEmpty && !kindUncertain }
     var warnings: [String] = []
+
+    // A company identifies an application, not an individual interview.
+    // Replacing an arrangement always requires an explicit selection.
+    private func sameArrangementFields(company oldCompany: String, kind oldKind: EventKind?, round oldRound: String, role oldRole: String) -> Bool {
+        let clean = { (value: String) in value.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return !clean(company).isEmpty && MailParser.companyKey(oldCompany) == MailParser.companyKey(company)
+            && !kindUncertain && oldKind == kind && clean(oldRound) == clean(round)
+            && (clean(role).isEmpty || clean(oldRole).isEmpty || clean(oldRole) == clean(role))
+    }
+    func canUpdate(_ event: InterviewEvent) -> Bool {
+        event.status == .pending && (canSchedule || rejected)
+            && sameArrangementFields(company: event.company, kind: event.kind, round: event.round ?? "", role: event.role)
+    }
+    func canUpdate(_ event: UnscheduledEvent) -> Bool {
+        !rejected && event.recordStatus == .pending
+            && sameArrangementFields(company: event.company, kind: event.kind, round: event.round, role: event.role)
+    }
 
     func event() throws -> InterviewEvent {
         guard !company.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DataError.invalid("请先填写公司名称。") }
